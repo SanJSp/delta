@@ -119,7 +119,8 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
           withStrictV2(
               () -> {
                 List<Row> rows = readChanges(tableName, 3, 3);
-                assertEquals(2, rows.size(), "Expected two deletes (one per file) at v3");
+                assertEquals(2, rows.size(),
+                    "Expected two deletes (one per file) at v3, got: " + rows);
                 assertChange(rows.get(0), 2L, "b", "delete", 3L);
                 assertChange(rows.get(1), 5L, "e", "delete", 3L);
               });
@@ -144,7 +145,8 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
           withStrictV2(
               () -> {
                 List<Row> rows = readChanges(tableName, 2, 3);
-                assertEquals(2, rows.size(), "Expected one delete per commit in v2..v3");
+                assertEquals(2, rows.size(),
+                    "Expected one delete per commit in v2..v3, got: " + rows);
                 assertChange(rows.get(0), 2L, "b", "delete", 2L);
                 assertChange(rows.get(1), 4L, "d", "delete", 3L);
               });
