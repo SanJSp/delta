@@ -159,4 +159,112 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
               });
         });
   }
+
+  // ===========================================================================================
+  // Bug investigation variants
+  //
+  // These tests probe which variable of the failing test_multiVersionDvDeletes scenario triggers
+  // Phase-1 carry-over removal to leak. Each isolates one variable from the failing setup.
+  // If a variant passes on CI, that variable is NOT the trigger; if it fails, we have a lead.
+  // ===========================================================================================
+
+  /**
+   * Isolates "prior DV state": only ONE DV-DELETE, no preceding DV update on the file. Same
+   * INSERT layout and same deleted row as the failing test, just without v2's DV update.
+   */
+  @Test
+  public void test_singleDvDelete_noPriorDvState() throws Exception {
+    withDvTable(
+        "single_dv_no_prior",
+        (tableName, tablePath) -> {
+          spark.sql(
+              String.format(
+                  "INSERT INTO %s VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')", tableName));
+          spark.sql(String.format("DELETE FROM %s WHERE id = 4", tableName)); // v2
+
+          withStrictV2(
+              () -> {
+                List<Row> rows = readChanges(tableName, 2, 2);
+                assertEquals(1, rows.size(), "Expected only id=4 delete at v2");
+                assertChange(rows.get(0), 4L, "d", "delete", 2L);
+              });
+        });
+  }
+
+  /**
+   * Isolates "range scope": same setup as failing test, but read v3..v3 only (skip v2's commit).
+   */
+  @Test
+  public void test_multiVersionDvDeletes_readOnlyLastVersion() throws Exception {
+    withDvTable(
+        "multi_version_dv_last",
+        (tableName, tablePath) -> {
+          spark.sql(
+              String.format(
+                  "INSERT INTO %s VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')", tableName));
+          spark.sql(String.format("DELETE FROM %s WHERE id = 2", tableName)); // v2
+          spark.sql(String.format("DELETE FROM %s WHERE id = 4", tableName)); // v3
+
+          withStrictV2(
+              () -> {
+                List<Row> rows = readChanges(tableName, 3, 3);
+                assertEquals(1, rows.size(), "Expected only id=4 delete at v3");
+                assertChange(rows.get(0), 4L, "d", "delete", 3L);
+              });
+        });
+  }
+
+  /**
+   * Isolates "deleted-row position": real-delete targets the FIRST row of the file instead of
+   * the middle. Phase-1 should still cancel the carry-overs of unchanged rows id=3 and id=5.
+   */
+  @Test
+  public void test_multiVersionDvDeletes_realDeleteAtFirstRow() throws Exception {
+    withDvTable(
+        "multi_version_dv_first",
+        (tableName, tablePath) -> {
+          spark.sql(
+              String.format(
+                  "INSERT INTO %s VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')", tableName));
+          spark.sql(String.format("DELETE FROM %s WHERE id = 2", tableName)); // v2
+          spark.sql(String.format("DELETE FROM %s WHERE id = 1", tableName)); // v3 - first row
+
+          withStrictV2(
+              () -> {
+                List<Row> rows = readChanges(tableName, 2, 3);
+                assertEquals(2, rows.size(),
+                    "Expected one delete per commit in v2..v3 (real delete at first row)");
+                assertChange(rows.get(0), 2L, "b", "delete", 2L);
+                assertChange(rows.get(1), 1L, "a", "delete", 3L);
+              });
+        });
+  }
+
+  /**
+   * Isolates "write path": uses INSERT INTO ... SELECT instead of INSERT VALUES, in case the
+   * LocalRelation path produces a different physical layout from a Project-over-Range path.
+   */
+  @Test
+  public void test_multiVersionDvDeletes_insertViaSelect() throws Exception {
+    withDvTable(
+        "multi_version_dv_select",
+        (tableName, tablePath) -> {
+          spark.sql(
+              String.format(
+                  "INSERT INTO %s SELECT id + 1, CHAR(96 + cast(id as int) + 1) "
+                      + "FROM range(5)",
+                  tableName));
+          spark.sql(String.format("DELETE FROM %s WHERE id = 2", tableName)); // v2
+          spark.sql(String.format("DELETE FROM %s WHERE id = 4", tableName)); // v3
+
+          withStrictV2(
+              () -> {
+                List<Row> rows = readChanges(tableName, 2, 3);
+                assertEquals(2, rows.size(),
+                    "Expected one delete per commit in v2..v3 (INSERT via SELECT)");
+                assertChange(rows.get(0), 2L, "b", "delete", 2L);
+                assertChange(rows.get(1), 4L, "d", "delete", 3L);
+              });
+        });
+  }
 }
