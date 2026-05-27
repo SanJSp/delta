@@ -73,16 +73,74 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
     void accept(String tableName, String tablePath) throws Exception;
   }
 
-  /** Read changelog as ordered list of (id, name, _change_type, _commit_version) rows. */
+  /**
+   * Read changelog including row-tracking metadata so assertion failures can show the
+   * {@code (row_id, row_commit_version)} pair Phase-1 carry-over removal partitions on.
+   */
   private List<Row> readChanges(String tableName, long startVersion, long endVersion) {
     return spark
         .sql(
             String.format(
-                "SELECT id, name, _change_type, _commit_version "
+                "SELECT id, name, _change_type, _commit_version, "
+                    + "_metadata.row_id AS _row_id, "
+                    + "_metadata.row_commit_version AS _row_commit_version "
                     + "FROM %s CHANGES FROM VERSION %d TO VERSION %d",
                 tableName, startVersion, endVersion))
         .orderBy("_commit_version", "id", "_change_type", "name")
         .collectAsList();
+  }
+
+  /**
+   * Build a verbose diagnostics block for failed CI runs - dumps DESCRIBE HISTORY, the table
+   * state at every version with row-tracking metadata, and the full CDF over v0..endVersion.
+   * Returned as a {@link java.util.function.Supplier} so the work is only paid on assertion
+   * failure.
+   */
+  private java.util.function.Supplier<String> diagnostics(
+      String tableName, long endVersion) {
+    return () -> {
+      StringBuilder sb = new StringBuilder();
+      sb.append("\n========== DIAGNOSTICS for ").append(tableName).append(" ==========\n");
+
+      sb.append("\n--- DESCRIBE HISTORY ---\n");
+      try {
+        spark.sql("DESCRIBE HISTORY " + tableName)
+            .select("version", "operation", "operationParameters")
+            .collectAsList()
+            .forEach(r -> sb.append("  ").append(r).append("\n"));
+      } catch (Exception e) {
+        sb.append("  failed: ").append(e).append("\n");
+      }
+
+      for (long v = 0; v <= endVersion; v++) {
+        sb.append("\n--- Table state @ v").append(v)
+            .append(" (id, name, row_id, row_commit_version) ---\n");
+        try {
+          spark.sql(String.format(
+              "SELECT id, name, _metadata.row_id, _metadata.row_commit_version "
+                  + "FROM %s VERSION AS OF %d ORDER BY id", tableName, v))
+              .collectAsList()
+              .forEach(r -> sb.append("  ").append(r).append("\n"));
+        } catch (Exception e) {
+          sb.append("  failed: ").append(e.getMessage()).append("\n");
+        }
+      }
+
+      sb.append("\n--- Full CDF over v0..v").append(endVersion).append(" (V1 path) ---\n");
+      try {
+        spark.sql(String.format(
+            "SELECT id, name, _change_type, _commit_version, "
+                + "_metadata.row_id, _metadata.row_commit_version "
+                + "FROM %s CHANGES FROM VERSION 0 TO VERSION %d "
+                + "ORDER BY _commit_version, id, _change_type", tableName, endVersion))
+            .collectAsList()
+            .forEach(r -> sb.append("  ").append(r).append("\n"));
+      } catch (Exception e) {
+        sb.append("  failed: ").append(e.getMessage()).append("\n");
+      }
+
+      return sb.toString();
+    };
   }
 
   private static void assertChange(
@@ -119,8 +177,10 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
           withStrictV2(
               () -> {
                 List<Row> rows = readChanges(tableName, 3, 3);
+                java.util.function.Supplier<String> diag = diagnostics(tableName, 3L);
                 assertEquals(2, rows.size(),
-                    "Expected two deletes (one per file) at v3, got: " + rows);
+                    () -> "Expected two deletes (one per file) at v3, got: " + rows
+                        + diag.get());
                 assertChange(rows.get(0), 2L, "b", "delete", 3L);
                 assertChange(rows.get(1), 5L, "e", "delete", 3L);
               });
@@ -145,8 +205,10 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
           withStrictV2(
               () -> {
                 List<Row> rows = readChanges(tableName, 2, 3);
+                java.util.function.Supplier<String> diag = diagnostics(tableName, 3L);
                 assertEquals(2, rows.size(),
-                    "Expected one delete per commit in v2..v3, got: " + rows);
+                    () -> "Expected one delete per commit in v2..v3, got: " + rows
+                        + diag.get());
                 assertChange(rows.get(0), 2L, "b", "delete", 2L);
                 assertChange(rows.get(1), 4L, "d", "delete", 3L);
               });
