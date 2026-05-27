@@ -83,7 +83,8 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
             String.format(
                 "SELECT id, name, _change_type, _commit_version, "
                     + "_metadata.row_id AS _row_id, "
-                    + "_metadata.row_commit_version AS _row_commit_version "
+                    + "_metadata.row_commit_version AS _row_commit_version, "
+                    + "input_file_name() AS _file_name "
                     + "FROM %s CHANGES FROM VERSION %d TO VERSION %d",
                 tableName, startVersion, endVersion))
         .orderBy("_commit_version", "id", "_change_type", "name")
@@ -211,6 +212,45 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
                         + diag.get());
                 assertChange(rows.get(0), 2L, "b", "delete", 2L);
                 assertChange(rows.get(1), 4L, "d", "delete", 3L);
+              });
+        });
+  }
+
+  /**
+   * Multi-file variant of {@link #test_multiVersionDvDeletes_perCommitIsolation} that
+   * deterministically lands {@code id=4} and {@code id=5} in the SAME physical file via two
+   * separate INSERTs. The v4 DV-DELETE on {@code id=4} then produces a same-path Add+Remove
+   * on that file, where the Remove side surfaces {@code id=5} as a {@code delete} event and
+   * the Add side surfaces {@code id=5} as an {@code insert} event - both sharing the same
+   * {@code (row_id, row_commit_version)}.
+   *
+   * <p>Phase-1 carry-over removal MUST cancel this pair. This test reproduces the layout the
+   * CI runner sees by default (write parallelism splits the original 5-row INSERT across
+   * files), without relying on host-specific parallelism settings.
+   */
+  @Test
+  public void test_multiFileDvDelete_carryoverInSameFileAsRealDelete() throws Exception {
+    withDvTable(
+        "multi_file_dv",
+        (tableName, tablePath) -> {
+          // v1: write {1, 2, 3} into one file.
+          spark.sql(String.format("INSERT INTO %s VALUES (1,'a'),(2,'b'),(3,'c')", tableName));
+          // v2: write {4, 5} into a second file -- this is the file v4 will DV-update.
+          spark.sql(String.format("INSERT INTO %s VALUES (4,'d'),(5,'e')", tableName));
+          // v3: DV-DELETE id=2 (affects file_A only).
+          spark.sql(String.format("DELETE FROM %s WHERE id = 2", tableName));
+          // v4: DV-DELETE id=4 (affects file_B, which also contains id=5 as carryover).
+          spark.sql(String.format("DELETE FROM %s WHERE id = 4", tableName));
+
+          withStrictV2(
+              () -> {
+                List<Row> rows = readChanges(tableName, 3, 4);
+                java.util.function.Supplier<String> diag = diagnostics(tableName, 4L);
+                assertEquals(2, rows.size(),
+                    () -> "Expected one delete per commit in v3..v4, got: " + rows
+                        + diag.get());
+                assertChange(rows.get(0), 2L, "b", "delete", 3L);
+                assertChange(rows.get(1), 4L, "d", "delete", 4L);
               });
         });
   }
