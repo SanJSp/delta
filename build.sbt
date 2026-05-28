@@ -529,7 +529,9 @@ lazy val sparkV2 = {
 // ============================================================
 lazy val spark = (project in file("spark-unified"))
   .dependsOn(sparkV1)
-  .dependsOn(sparkV2)
+  // test->test so spark-unified test sources can reuse helpers like
+  // DeltaV2TestBase from sparkV2's test scope.
+  .dependsOn(sparkV2 % "compile->compile;test->test")
   .dependsOn(storage)
   .disablePlugins(JavaFormatterPlugin, ScalafmtPlugin)
   .settings (
@@ -560,6 +562,16 @@ lazy val spark = (project in file("spark-unified"))
     ),
 
     CrossSparkVersions.sparkDependentSettings(sparkVersion),
+
+    // Add version-specific test shim directory, e.g. `src/test/scala-shims/spark-4.2`.
+    Test / unmanagedSourceDirectories ++= {
+      val ver = sparkVersion.value
+      SparkVersionSpec.ALL_SPECS
+        .find(_.fullVersion == ver)
+        .flatMap(_.additionalSourceDir)
+        .map(dir => Seq(baseDirectory.value / "src" / "test" / dir))
+        .getOrElse(Seq.empty)
+    },
 
     // MiMa should use the generated JAR (not classDirectory) because we merge classes at package time
     mimaCurrentClassfiles := (Compile / packageBin).value,
@@ -661,6 +673,10 @@ lazy val spark = (project in file("spark-unified"))
       "org.scalatestplus" %% "scalacheck-1-15" % "3.2.9.0" % "test",
       "junit" % "junit" % "4.13.2" % "test",
       "com.novocode" % "junit-interface" % "0.11" % "test",
+      "org.junit.jupiter" % "junit-jupiter-api" % "5.11.4" % "test",
+      "org.junit.jupiter" % "junit-jupiter-engine" % "5.11.4" % "test",
+      "org.junit.jupiter" % "junit-jupiter-params" % "5.11.4" % "test",
+      "com.github.sbt.junit" % "jupiter-interface" % "0.17.0" % "test",
       "org.apache.spark" %% "spark-catalyst" % sparkVersion.value % "test" classifier "tests",
       "org.apache.spark" %% "spark-core" % sparkVersion.value % "test" classifier "tests",
       "org.apache.spark" %% "spark-sql" % sparkVersion.value % "test" classifier "tests",
