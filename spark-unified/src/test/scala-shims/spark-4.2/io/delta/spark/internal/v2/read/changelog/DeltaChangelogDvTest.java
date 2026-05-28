@@ -45,6 +45,7 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
   private void withDvTable(String suffix, ThrowingConsumer body) throws Exception {
     String tableName = "dsv2_cdc_dv_" + suffix + "_" + System.nanoTime();
     String tablePath = System.getProperty("java.io.tmpdir") + "/" + tableName;
+    logCatalogProvenance(suffix);
     withTable(
         tablePath,
         () ->
@@ -59,6 +60,50 @@ public class DeltaChangelogDvTest extends DeltaChangelogTestBase {
                           tableName, tablePath));
                   body.accept(tableName, tablePath);
                 }));
+  }
+
+  /**
+   * Prints which DeltaCatalog class is currently mounted, where it was loaded from, and whether
+   * it carries the ChangelogSupport mixin. Used to diagnose classpath-shadowing where the
+   * released delta-spark 4.0.0 DeltaCatalog (no ChangelogSupport) wins resolution against the
+   * in-tree class on the test classpath.
+   */
+  private void logCatalogProvenance(String testTag) {
+    try {
+      Object cat = spark.sessionState().catalogManager().v2SessionCatalog();
+      Class<?> klass = cat.getClass();
+      String name = klass.getName();
+      String location = "<unknown>";
+      try {
+        java.security.CodeSource cs = klass.getProtectionDomain().getCodeSource();
+        if (cs != null && cs.getLocation() != null) {
+          location = cs.getLocation().toString();
+        }
+      } catch (Throwable ignored) { /* best-effort */ }
+      boolean hasChangelogSupport = false;
+      for (Class<?> i : klass.getInterfaces()) {
+        if (i.getName().endsWith(".ChangelogSupport")) {
+          hasChangelogSupport = true;
+          break;
+        }
+      }
+      Class<?> superClass = klass.getSuperclass();
+      while (!hasChangelogSupport && superClass != null) {
+        for (Class<?> i : superClass.getInterfaces()) {
+          if (i.getName().endsWith(".ChangelogSupport")) {
+            hasChangelogSupport = true;
+            break;
+          }
+        }
+        superClass = superClass.getSuperclass();
+      }
+      System.err.println(
+          "[CATALOG-PROVENANCE test=" + testTag + "] class=" + name
+              + " loadedFrom=" + location
+              + " implementsChangelogSupport=" + hasChangelogSupport);
+    } catch (Throwable t) {
+      System.err.println("[CATALOG-PROVENANCE test=" + testTag + "] failed: " + t);
+    }
   }
 
   /**
